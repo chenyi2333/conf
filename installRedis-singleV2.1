@@ -1,0 +1,165 @@
+#!/bin/bash
+# author Yangxiaohui
+# version _V2.1
+# date 2019-05-29 15:49
+# LSOF 端口检测包 版本信息 用来验证是否安装过LSOF
+LSOF_PATH=$(which lsof)
+# DOCKER 版本信息 用来验证DOCKER是否安装过
+DOCKER_PATH=$(which docker)
+# 默认配置文件路径
+BASE_REDIS_CONFIG=$PWD/redis.conf
+# 安装位置
+INSTALL_PATH=$PWD
+# 容器密码
+REDIS_PASS=''
+REDIS_NAME=''
+REDIS_PORT=6379
+# 检测脚本运行时的参数 -c 配置文件位置  -h 安装路径 -p 容器密码 -n 自定义容器名称 -o 自定义容器端口
+while getopts "c:h:p:n:o:f" opt
+do
+    case $opt in
+        c)
+            BASE_REDIS_CONFIG="$OPTARG"
+        ;;
+        h)
+            INSTALL_PATH="$OPTARG"
+        ;;
+        p)
+            REDIS_PASS="$OPTARG"
+        ;;
+        n)
+            REDIS_NAME="$OPTARG"
+        ;;
+        o)
+            REDIS_PORT="$OPTARG"
+        ;;
+        f)
+            echo "参数:  "
+            echo "  -c 配置文件位置（默认从网络下载最新配置模板）"
+            echo "  -h 安装路径（默认当前目录 创建容器目录）"
+            echo "  -p 容器REDIS密码 （默认不设置密码）"
+            echo "  -n 自定义容器名称 （默认 redis+端口号）"
+            echo "  -o 自定义容器端口 （默认6379）"
+            echo "  -f 命令提示"
+            exit 
+        ;;
+        ?)
+            echo "未知参数"
+        exit 1;;
+    esac
+done
+# 检测配置文件是否存在
+if [ ! -f "$BASE_REDIS_CONFIG" ]; then
+    echo "警告 未找到有效的配置文件 将自动下载最新模板配置文件-当前目录！-> $BASE_REDIS_CONFIG"
+    # 下载文件
+    wget https://github.com/chenyi2333/conf/releases/download/1.0/redis.conf
+    DOW_CONFIG_PATH=$PWD/redis.conf
+    # 校验是否下载成功
+    if [ ! -f "$DOW_CONFIG_PATH" ]; then
+        echo "下载终止 未能成功下载配置文件模板 请手动下载：https://github.com/chenyi2333/conf/releases/download/1.0/redis.conf"
+        exit
+    else
+        BASE_REDIS_CONFIG=$DOW_CONFIG_PATH
+    fi
+fi
+# 检测用户输入端口是否被占用 
+PORT_IS_USEING=$(lsof -i tcp:$REDIS_PORT)
+if [ -n "$PORT_IS_USEING" ]; then
+    echo "终止安装 端口被占用：$PORT_IS_USEING"
+    exit
+else
+    sed -i '/^port/c port '$REDIS_PORT''  $BASE_REDIS_CONFIG
+fi
+# 检测用户如果没有输入容器名 就默认redis+'_'+端口
+if [ -z "$REDIS_NAME" ]; then
+    REDIS_NAME="redis_$REDIS_PORT"
+fi
+
+# 剪切一份配置文件到 安装路径
+INSTALL_PATH="$INSTALL_PATH/$REDIS_NAME"
+mkdir -p $INSTALL_PATH/conf
+mv "$BASE_REDIS_CONFIG" "$INSTALL_PATH/conf/redis.conf"
+BASE_REDIS_CONFIG=$INSTALL_PATH/conf/redis.conf
+
+# 检测安装路径是否存在
+if [ ! -d "$INSTALL_PATH" ]; then
+    echo "终止安装 无效的安装路径：$INSTALL_PATH"
+fi
+
+# 检测LSOF包信息 如果没有安装 提示用户进行安装
+if [ -z "$LSOF_PATH" ]; then
+    read -p "检测到当前系统没有安装lsof-端口占用情况检测工具（缺失该依赖 将无法完成后续安装工作） 请输入y/n选择是否安装" IS_WANT_INSTALL_LSOF
+    if [ "$IS_WANT_INSTALL_LSOF" == "y" ]; then
+        sudo yum install lsof
+    else
+        echo "终止安装 请手动安装lsof包后重试！"
+        exit
+    fi
+fi
+
+# 检测DOCKER信息 如果没有安装 提示进行安装
+if [ -z "$DOCKER_PATH" ]; then
+    read -p "检测到当前系统没有安装Docker（缺失该依赖 将无法完成后续安装工作） 请输入y/n选择是否安装" IS_WANT_INSTALL_DOCKER
+    if [ "$IS_WANT_INSTALL_DOCKER" == "y" ]; then
+        # 安装docker
+        sudo yum install -y yum-utils device-mapper-persistent-data lvm2
+        sudo yum-config-manager --add-repo http://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+        sudo yum makecache fast
+        sudo yum -y install docker-ce
+    else
+        echo "终止安装 请手动安装Docker后重试！"
+        exit
+    fi
+fi
+
+# 检测用户是否输入密码
+if [ -n "$REDIS_PASS" ]; then
+    # 1.查找密码设置信息
+    CONFIG_PASS_INFO_ONE=$(sed -n '/^# requirepass /p' $BASE_REDIS_CONFIG)
+    if [ -z "$CONFIG_PASS_INFO_ONE" ];then
+        CONFIG_PASS_INFO_TWO=$(sed -n '/^requirepass /p' $BASE_REDIS_CONFIG)
+        if [ -n "$CONFIG_PASS_INFO_TWO"]; then
+            sed -i '/^requirepass /c requirepass '$REDIS_PASS''  $BASE_REDIS_CONFIG
+        else
+            echo "终止安装 非法的配置文件：$BASE_REDIS_CONFIG"
+            exit
+        fi
+    else
+        sed -i '/^# requirepass /c requirepass '$REDIS_PASS''  $BASE_REDIS_CONFIG
+    fi
+fi
+
+# 执行DOCKER命令
+docker pull redis:3.2
+DOCKER_INSTALL_RESULT=$(docker run -d --privileged=true -p $REDIS_PORT:$REDIS_PORT -v $INSTALL_PATH/conf:/etc/redis/ -v $INSTALL_PATH/data:/data --name $REDIS_NAME redis:3.2 redis-server /etc/redis/redis.conf --appendonly yes)
+echo "LSOF 路径 $LSOF_PATH"
+echo "DOCKER 路径 $DOCKER_PATH"
+# echo "默认配置文件路径 $BASE_REDIS_CONFIG"
+echo "安装位置 $INSTALL_PATH"
+echo "密码 $REDIS_PASS"
+echo "容器名称 $REDIS_NAME"
+echo "端口 $REDIS_PORT"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
